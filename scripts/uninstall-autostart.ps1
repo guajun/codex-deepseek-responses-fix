@@ -1,31 +1,31 @@
 <#
 .SYNOPSIS
-    Remove the watchdog task and stop the proxy.
+    Remove the logon auto-start entry and stop running proxy instances.
 
 .DESCRIPTION
-    Unregisters the scheduled task installed by install-autostart.cmd, removes
-    the legacy Startup-folder shortcut if it still exists, and stops
-    python/pythonw processes whose command line points at this repository's
-    proxy script. Other Python processes are never touched.
+    Removes the per-user Startup-folder shortcut, unregisters any legacy
+    "Codex DeepSeek Fix Proxy" scheduled task, and stops python/pythonw
+    processes whose command line points at this repository's proxy script.
+    Other Python processes are never touched.
 #>
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $taskName = 'Codex DeepSeek Fix Proxy'
 
-$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($task) {
+$legacyTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($legacyTask) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "Removed scheduled task: $taskName" -ForegroundColor Green
-}
-else {
-    Write-Host "Scheduled task '$taskName' was not installed."
+    Write-Host "Removed legacy watchdog task: $taskName" -ForegroundColor Green
 }
 
-$legacyShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'DeepSeek Responses Fix Proxy.lnk'
-if (Test-Path -LiteralPath $legacyShortcut) {
-    Remove-Item -LiteralPath $legacyShortcut -Force
-    Write-Host "Removed legacy Startup shortcut: $legacyShortcut" -ForegroundColor Green
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'DeepSeek Responses Fix Proxy.lnk'
+if (Test-Path -LiteralPath $shortcutPath) {
+    Remove-Item -LiteralPath $shortcutPath -Force
+    Write-Host "Removed logon shortcut: $shortcutPath" -ForegroundColor Green
+}
+else {
+    Write-Host 'No logon shortcut was installed.'
 }
 
 $proxy = Join-Path $root 'deepseek_responses_fix_proxy.py'

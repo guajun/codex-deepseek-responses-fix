@@ -1,7 +1,6 @@
 proxy.log
 proxy.log.*
-watchdog.log
-watchdog.log.*
+diagnose-report.txt
 *.log
 __pycache__/
 *.py[cod]

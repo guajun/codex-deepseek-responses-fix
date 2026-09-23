@@ -82,8 +82,9 @@ Codex 主仓库（openai/codex）：
 | `deepseek.ps1` | 便捷启动脚本，读取上面的配置，可用参数覆盖 |
 | `start-proxy.cmd` | 双击 = 前台启动代理 |
 | `restart-service.cmd` | 双击 = 停止并重新后台启动代理（改完 `deepseek.config.psd1` 后用） |
-| `install-autostart.cmd` | 双击 = 安装看门狗任务（登录自启 + 每 5 分钟自愈，无需管理员） |
-| `uninstall-autostart.cmd` | 双击 = 卸载看门狗任务并停止代理进程 |
+| `install-autostart.cmd` | 双击 = 安装登录自启快捷方式（只启动一次，无自愈，无需管理员） |
+| `uninstall-autostart.cmd` | 双击 = 移除自启并停止代理进程 |
+| `diagnose.cmd` | 双击 = 诊断配置/端口/进程/链路/日志，输出 `diagnose-report.txt` |
 
 ## 快速开始
 
@@ -114,22 +115,37 @@ experimental_bearer_token = "..."
 重启 Codex。已经被坏条目卡住的会话不需要 fork，重新打开重试即可：坏条目还在
 rollout 里，但每次发送时都会被代理修掉。
 
-### 3. 开机自启
+### 3. 开机自启（可选，无自愈）
 
-双击 `install-autostart.cmd`：注册一个**当前用户级计划任务**（无需管理员），
-它在登录后 30 秒触发一次，并且每 5 分钟运行一次 `scripts\ensure-proxy.ps1`。
-这个脚本先检查监听端口，只有代理没在跑时才启动，所以这个任务同时是自启和看门狗：
-代理崩溃、被误杀，或者只是重启了 Codex 而代理没起来，最多 5 分钟内都会自动恢复。
+双击 `install-autostart.cmd`：在当前用户的启动文件夹里创建一个快捷方式，用
+`pythonw.exe` 无窗口启动代理。**它只在 Windows 登录时运行一次，不含任何看门狗或
+自动重启逻辑**。代理中途挂掉、被误杀，或你只重启了 Codex 而代理没起来，都需要手动
+双击 `restart-service.cmd`（或 `start-proxy.cmd`）。
 
-旧版「启动文件夹快捷方式」只会在此前从未登录过的下次登录时执行一次，代理中途挂掉
-不会拉起，所以安装脚本会自动删除它，避免两个启动器抢同一个端口。
-
-启动/失败事件记录在 `watchdog.log`，请求流量记录在 `proxy.log`。
-双击 `uninstall-autostart.cmd` 即可注销任务并停止由本目录启动的代理进程。
+安装脚本会自动注销早期版本留下的 `Codex DeepSeek Fix Proxy` 计划任务，避免自愈
+进程继续运行。双击 `uninstall-autostart.cmd` 即可移除快捷方式、注销残留任务并停止
+由本目录启动的代理进程。
 
 改完 `deepseek.config.psd1`（`Upstream` / `Listen` / `Role` / `LogFile`）之后，
 双击 `restart-service.cmd` 就能让新配置生效：它会停掉正在运行的代理，按当前配置
 重新后台启动，并确认监听端口已经起来，不需要重装自启。
+
+### 4. 诊断
+
+双击 `diagnose.cmd`，它会检查并把结论写到 `diagnose-report.txt`：
+
+- `config.toml` 里 deepseek provider 的 `base_url` / `wire_api` / 凭据是否存在；
+- `base_url` 的端口和代理 `Listen` 端口是否一致（这是最常见的
+  `Connection failed: error sending request` 原因）；
+- 代理进程是否存在、端口是否在监听、进程启动时间；
+- 上游 `api.deepseek.com:443` 是否可达，以及代理→上游的真实链路探测（用一条免费的
+  `GET /__diagnose__`，任何 HTTP 状态都说明转发成功）；
+- Codex 进程启动时间是否早于 `config.toml` 的最后修改时间（早于则说明它还在用旧
+  配置，需要彻底重启 Codex）；
+- 是否残留自愈计划任务、是否安装了登录自启快捷方式；
+- `proxy.log` 最近的状态码统计（401 / 422 / 200）。
+
+诊断脚本不打印任何密钥，也不消耗 API token。
 
 注意：`DEEPSEEK_API_KEY` 是 **Codex** 通过 `env_key` 读取、再由 Codex 放进
 Authorization 头的，代理只负责透传。所以换 key 之后要重启的是 Codex，不是这个
