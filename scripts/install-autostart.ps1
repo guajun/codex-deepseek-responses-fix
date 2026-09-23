@@ -24,7 +24,7 @@ if (Test-Path -LiteralPath $configPath) {
 }
 
 $upstream = if ($cfg.Upstream) { $cfg.Upstream } else { 'https://api.deepseek.com' }
-$listen = if ($cfg.Listen) { $cfg.Listen } else { '127.0.0.1:8787' }
+$listen = if ($cfg.Listen) { $cfg.Listen } else { '127.0.0.1:18787' }
 $role = if ($cfg.Role) { $cfg.Role } else { 'user' }
 $verbose = if ($null -ne $cfg.Verbose) { [bool]$cfg.Verbose } else { $true }
 $logFile = if ($cfg.LogFile) { $cfg.LogFile } else { Join-Path $root 'proxy.log' }

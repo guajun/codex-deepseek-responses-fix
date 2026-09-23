@@ -4,7 +4,7 @@
     Upstream = 'https://api.deepseek.com'
 
     # Local listen address. Must match base_url in ~/.codex/config.toml.
-    Listen = '127.0.0.1:8787'
+    Listen = '127.0.0.1:18787'
 
     # Role used when an orphan function_call_output is rewritten into a
     # message: 'user' or 'developer'.

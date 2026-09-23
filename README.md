@@ -58,7 +58,7 @@ Codex 自己的协议允许 `call_id` 为空（序列化时直接省略这个键
 ```powershell
 .\deepseek.ps1              # 前台运行，Ctrl+C 停止
 .\deepseek.ps1 -Background  # 后台运行
-.\deepseek.ps1 -Upstream https://api.deepseek.com -Listen 127.0.0.1:8787
+.\deepseek.ps1 -Upstream https://api.deepseek.com -Listen 127.0.0.1:18787
 .\deepseek.ps1 -Role developer
 ```
 
@@ -70,7 +70,7 @@ Codex 自己的协议允许 `call_id` 为空（序列化时直接省略这个键
 ```toml
 [model_providers.deepseek]
 name = "deepseek"
-base_url = "http://127.0.0.1:8787/"
+base_url = "http://127.0.0.1:18787/"
 wire_api = "responses"
 experimental_bearer_token = "..."
 ```
@@ -92,7 +92,7 @@ rollout 里，但每次发送时都会被代理修掉。
 ```powershell
 @{
     Upstream = 'https://api.deepseek.com'
-    Listen   = '127.0.0.1:8787'
+    Listen   = '127.0.0.1:18787'
     Role     = 'user'          # user 或 developer
     Verbose  = $true
     LogFile  = ''              # 留空 = 本目录 proxy.log
@@ -102,7 +102,7 @@ rollout 里，但每次发送时都会被代理修掉。
 代理命令行参数：
 
 ```text
---listen 127.0.0.1:8787        本地监听地址
+--listen 127.0.0.1:18787       本地监听地址
 --upstream https://api.deepseek.com
 --role user|developer          孤立输出改写成哪种消息
 --verbose                      记录每个请求的修复摘要

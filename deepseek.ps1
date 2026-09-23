@@ -10,7 +10,7 @@
 .EXAMPLES
     .\deepseek.ps1
     .\deepseek.ps1 -Background
-    .\deepseek.ps1 -Upstream https://api.deepseek.com -Listen 127.0.0.1:8787
+    .\deepseek.ps1 -Upstream https://api.deepseek.com -Listen 127.0.0.1:18787
     .\deepseek.ps1 -Role developer
 #>
 [CmdletBinding()]
@@ -33,7 +33,7 @@ if (Test-Path -LiteralPath $ConfigFile) {
 }
 
 $upstream = if ($Upstream) { $Upstream } elseif ($cfg.Upstream) { $cfg.Upstream } else { 'https://api.deepseek.com' }
-$listen = if ($Listen) { $Listen } elseif ($cfg.Listen) { $cfg.Listen } else { '127.0.0.1:8787' }
+$listen = if ($Listen) { $Listen } elseif ($cfg.Listen) { $cfg.Listen } else { '127.0.0.1:18787' }
 $role = if ($Role) { $Role } elseif ($cfg.Role) { $cfg.Role } else { 'user' }
 $verbose = if ($Quiet) { $false } elseif ($null -ne $cfg.Verbose) { [bool]$cfg.Verbose } else { $true }
 $logFile = if ($cfg.LogFile) { $cfg.LogFile } else { Join-Path $root 'proxy.log' }

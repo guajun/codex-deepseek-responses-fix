@@ -42,14 +42,14 @@ arrive). No third-party packages.
 
 Quick start
 -----------
-    python deepseek_responses_fix_proxy.py --listen 127.0.0.1:8787 \
+    python deepseek_responses_fix_proxy.py --listen 127.0.0.1:18787 \
         --upstream https://api.deepseek.com --verbose
 
 Then point Codex at the proxy in ``~/.codex/config.toml``:
 
     [model_providers.deepseek]
     name = "deepseek"
-    base_url = "http://127.0.0.1:8787/"
+    base_url = "http://127.0.0.1:18787/"
     wire_api = "responses"
     experimental_bearer_token = "..."   # unchanged: forwarded upstream
 
@@ -434,7 +434,7 @@ def build_server(
 ) -> ProxyServer:
     host, _, port_text = listen.rpartition(":")
     if not host or not port_text.isdigit():
-        raise SystemExit(f"--listen must look like 127.0.0.1:8787, got {listen!r}")
+        raise SystemExit(f"--listen must look like 127.0.0.1:18787, got {listen!r}")
     upstream = urllib.parse.urlsplit(upstream_url)
     if upstream.scheme not in {"http", "https"} or not upstream.hostname:
         raise SystemExit(f"--upstream must be an http(s) URL, got {upstream_url!r}")
@@ -514,7 +514,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Repair Codex standalone function_call_output items before a strict /responses upstream."
     )
-    parser.add_argument("--listen", default="127.0.0.1:8787", help="local address (default: %(default)s)")
+    parser.add_argument("--listen", default="127.0.0.1:18787", help="local address (default: %(default)s)")
     parser.add_argument(
         "--upstream",
         default="https://api.deepseek.com",
