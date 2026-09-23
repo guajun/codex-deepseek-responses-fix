@@ -67,9 +67,10 @@ import json
 import shutil
 import sys
 import urllib.parse
+import re
 from dataclasses import dataclass, field
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 CALL_TYPES = {"function_call"}
 OUTPUT_TYPES = {"function_call_output"}
@@ -95,18 +96,23 @@ HOP_BY_HOP = {
 @dataclass
 class RepairStats:
     rewritten_outputs: int = 0
+    rewritten_agent_messages: int = 0
     synthesized_outputs: int = 0
     rewritten_names: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.rewritten_outputs or self.synthesized_outputs)
+        return bool(
+            self.rewritten_outputs or self.rewritten_agent_messages or self.synthesized_outputs
+        )
 
     def summary(self) -> str:
         parts = []
         if self.rewritten_outputs:
             names = ",".join(self.rewritten_names[:4]) or "unnamed"
             parts.append(f"rewrote {self.rewritten_outputs} orphan output(s) [{names}]")
+        if self.rewritten_agent_messages:
+            parts.append(f"rewrote {self.rewritten_agent_messages} agent message(s)")
         if self.synthesized_outputs:
             parts.append(f"synthesized {self.synthesized_outputs} missing output(s)")
         return "; ".join(parts) if parts else "clean"
@@ -141,6 +147,51 @@ def _item_label(item: dict) -> str:
     name = item.get("name")
     label = ".".join(str(part) for part in (namespace, name) if part)
     return label or str(item.get("id") or "unnamed")
+
+
+def _looks_like_plaintext(value: str) -> bool:
+    """True for readable payloads, False for opaque base64-ish blobs.
+
+    Codex's multi-agent v2 puts the task payload into an ``encrypted_content``
+    part. On OpenAI that part is opaque ciphertext; on third-party providers it
+    is currently stored as plaintext. Base64 blobs contain no whitespace or
+    punctuation, so this cheap heuristic keeps real ciphertext untouched.
+    """
+    if not value:
+        return False
+    compact = value.strip()
+    if not compact:
+        return False
+    if len(compact) > 200 and re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+        return False
+    return True
+
+
+def agent_message_text(item: dict) -> str:
+    """Collect the readable text of an ``agent_message`` item.
+
+    The plaintext envelope (input_text) and the payload stored in a
+    plaintext-looking ``encrypted_content`` part are joined, so the model sees
+    both "Message Type: NEW_TASK ... Payload:" and the actual task body.
+    """
+    parts: list[str] = []
+    content = item.get("content")
+    if isinstance(content, str):
+        parts.append(content)
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind in ("input_text", "output_text", "text"):
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif kind == "encrypted_content":
+                value = part.get("encrypted_content")
+                if isinstance(value, str) and _looks_like_plaintext(value):
+                    parts.append(value)
+    return "\n".join(part for part in parts if part).strip()
 
 
 def _normalize_batches(items: list, synth_missing: bool) -> tuple[list, int]:
@@ -193,6 +244,7 @@ def repair_payload(
     role: str = "user",
     synth_missing: bool = True,
     normalize_batches: bool = True,
+    rewrite_agent_messages: bool = True,
 ) -> RepairStats:
     """Repair ``payload["input"]`` in place. Returns what was changed."""
     stats = RepairStats()
@@ -209,6 +261,23 @@ def repair_payload(
 
     rewritten: list = []
     for item in items:
+        if (
+            rewrite_agent_messages
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+        ):
+            text = agent_message_text(item)
+            if text:
+                rewritten.append(
+                    {
+                        "type": "message",
+                        "role": role,
+                        "content": [{"type": "input_text", "text": text}],
+                    }
+                )
+                stats.rewritten_agent_messages += 1
+                stats.rewritten_names.append(_item_label(item))
+                continue
         if isinstance(item, dict) and item.get("type") in OUTPUT_TYPES:
             call_id = _call_id_of(item)
             if not call_id or call_id not in known_calls:
@@ -244,6 +313,7 @@ class ProxyServer(http.server.ThreadingHTTPServer):
         role: str = "user",
         synth_missing: bool = True,
         normalize_batches: bool = True,
+        rewrite_agent_messages: bool = True,
         timeout: float = 300.0,
         verbose: bool = False,
     ) -> None:
@@ -252,6 +322,7 @@ class ProxyServer(http.server.ThreadingHTTPServer):
         self.role = role
         self.synth_missing = synth_missing
         self.normalize_batches = normalize_batches
+        self.rewrite_agent_messages = rewrite_agent_messages
         self.timeout = timeout
         self.verbose = verbose
 
@@ -332,6 +403,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             role=server.role,
             synth_missing=server.synth_missing,
             normalize_batches=server.normalize_batches,
+            rewrite_agent_messages=server.rewrite_agent_messages,
         )
         if not stats.changed:
             return body, stats
@@ -445,6 +517,7 @@ def build_server(
     role: str = "user",
     synth_missing: bool = True,
     normalize_batches: bool = True,
+    rewrite_agent_messages: bool = True,
     timeout: float = 300.0,
     verbose: bool = False,
 ) -> ProxyServer:
@@ -460,6 +533,7 @@ def build_server(
         role=role,
         synth_missing=synth_missing,
         normalize_batches=normalize_batches,
+        rewrite_agent_messages=rewrite_agent_messages,
         timeout=timeout,
         verbose=verbose,
     )
@@ -496,6 +570,22 @@ def selftest() -> int:
                 "namespace": "codex_app",
                 "output": delegation,
             },
+            {
+                "type": "agent_message",
+                "id": "amsg_1",
+                "author": "/root",
+                "recipient": "/root/worker",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n",
+                    },
+                    {
+                        "type": "encrypted_content",
+                        "encrypted_content": "do the thing\nTOKEN: ABC-123",
+                    },
+                ],
+            },
         ],
     }
     stats = repair_payload(payload)
@@ -503,6 +593,7 @@ def selftest() -> int:
     types = [item.get("type") for item in items]
 
     assert stats.rewritten_outputs == 1, stats
+    assert stats.rewritten_agent_messages == 1, stats
     assert stats.synthesized_outputs == 1, stats
     assert "function_call_output" not in {
         item.get("type")
@@ -520,8 +611,11 @@ def selftest() -> int:
         "function_call_output",
         "function_call_output",
         "message",
+        "message",
     ], types
     assert items[4]["call_id"] == "call_missing" and items[4]["output"] == "aborted"
+    assert "do the thing" in items[6]["content"][0]["text"], items[6]
+    assert "TOKEN: ABC-123" in items[6]["content"][0]["text"], items[6]
     print("selftest OK:", stats.summary())
     return 0
 
@@ -554,6 +648,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="do not reorder runs so calls precede their outputs",
     )
+    parser.add_argument(
+        "--no-rewrite-agent-messages",
+        dest="rewrite_agent_messages",
+        action="store_false",
+        help="do not convert agent_message items into standard user messages",
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="upstream socket timeout in seconds")
     parser.add_argument("--verbose", action="store_true", help="log every request and repair summary")
     parser.add_argument(
@@ -582,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
         role=args.role,
         synth_missing=args.synth_missing,
         normalize_batches=args.normalize_batches,
+        rewrite_agent_messages=args.rewrite_agent_messages,
         timeout=args.timeout,
         verbose=args.verbose,
     )

@@ -44,6 +44,8 @@ Codex 主仓库（openai/codex）：
 | [#42088](https://github.com/openai/codex/issues/42088) | open | 总根因：`function_call_output` 可以不带 `call_id`，严格上游直接拒包 |
 | [#46193](https://github.com/openai/codex/issues/46193) | open | 配对校验只在重建历史时做，发送边界没有守卫；孤立输出是设计产物 |
 | [#45450](https://github.com/openai/codex/issues/45450) | open | 只补 `call_id` 不够：没有配套 `function_call` 仍会被拒 |
+| [#45233](https://github.com/openai/codex/issues/45233) | open | 自定义 provider 下 `spawn_agent` 子任务 payload 被丢：子线程只拿到空信封 |
+| [#46939](https://github.com/openai/codex/issues/46939) | open | Multi-Agent V2 把任务 `message` 标记为 encrypted，请求增加明文投递开关 |
 | [#45227](https://github.com/openai/codex/issues/45227) | open | Windows + DeepSeek：坏条目写进 rollout 后整个线程永久失败 |
 | [#45914](https://github.com/openai/codex/issues/45914) | open | `send_message_to_thread` 的 `function_call_output` 落盘时没有 `call_id` |
 | [#45318](https://github.com/openai/codex/issues/45318) | open | 跨任务消息被记成无 `call_id` 的 `function_call_output`，整轮请求被拒 |
@@ -64,13 +66,21 @@ Codex 主仓库（openai/codex）：
 
 ## 代理怎么修
 
-请求经过代理时做三件事，其余内容（Header、Authorization、query、SSE 流）原样透传：
+请求经过代理时做四件事，其余内容（Header、Authorization、query、SSE 流）原样透传：
 
 1. `call_id` 缺失/为空/匹配不到 `function_call` 的 `function_call_output`
    → 改写成一条普通 `message`（默认 `role=user`），保留原始文本，注入内容不丢。
-2. 有 `function_call` 却没有对应输出的 → 补一条 `output: "aborted"`，
+2. `agent_message`（Multi-Agent V2 的子任务信封）→ 把明文信封和
+   `encrypted_content` 里以明文存放的 payload 合并成一条标准 `user` message。
+   在非 OpenAI 上游上 Codex 实际不会加密任务正文，只是把字段名留成了
+   `encrypted_content`；DeepSeek 不认识这个字段，子智能体就只看到
+   `Payload:` 后面空白（见
+   [#45233](https://github.com/openai/codex/issues/45233)、
+   [#46939](https://github.com/openai/codex/issues/46939)）。真正的 base64
+   密文会被跳过，不会误转。
+3. 有 `function_call` 却没有对应输出的 → 补一条 `output: "aborted"`，
    与 Codex 自己重建历史时的做法一致。
-3. 连续的「调用/输出」批次 → 统一成先全部 `function_call`、再全部输出，
+4. 连续的「调用/输出」批次 → 统一成先全部 `function_call`、再全部输出，
    满足严格上游的批次顺序要求。
 
 ## 文件说明
