@@ -108,8 +108,10 @@ catalog v2，探针完整收到 payload，代理日志对应 `rewrote 1 agent me
    [#45233](https://github.com/openai/codex/issues/45233)、
    [#46939](https://github.com/openai/codex/issues/46939)）。真正的 base64
    密文会被跳过，不会误转。
-3. 有 `function_call` 却没有对应输出的 → 补一条 `output: "aborted"`，
-   与 Codex 自己重建历史时的做法一致。
+3. 有 `function_call` 却在整个请求里都没有对应输出的 → 补一条 `output: "aborted"`，
+   与 Codex 自己重建历史时的做法一致。判断范围是**整个请求**：如果 call 和它的真实
+   输出被 `custom_tool_call` / reasoning 等非配对 item 隔开，不会误补，避免上游报
+   `Duplicate tool output for call_id`（v1.0.3 修复）。
 4. 连续的「调用/输出」批次 → 统一成先全部 `function_call`、再全部输出，
    满足严格上游的批次顺序要求。
 
@@ -233,6 +235,8 @@ key（`--api-key-env` 模式）时，重启代理才会影响鉴权。
   `rewrote 1 agent message(s)`。
 - 子智能体 payload（路线 A 对照）：catalog 改成 `v1` 时，子线程收到的是普通
   `message role=user`、正文明文，子智能体回复 `PLAIN-4T7`。
+- 重复工具输出回归：call 与真实输出被 `custom_tool_call` 隔开时，代理只保留真实输出、
+  不再补 `aborted`；同一结构直连 DeepSeek 从 `400 Duplicate tool output` 变为 `200`。
 
 ## 限制与注意
 

@@ -70,7 +70,7 @@ import urllib.parse
 import re
 from dataclasses import dataclass, field
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 CALL_TYPES = {"function_call"}
 OUTPUT_TYPES = {"function_call_output"}
@@ -202,6 +202,19 @@ def _normalize_batches(items: list, synth_missing: bool) -> tuple[list, int]:
     Codex's own ``ensure_call_outputs_present`` does when rebuilding history.
     Only maximal runs made solely of call/output items are touched.
     """
+    # A call counts as answered when *any* output in the whole request carries
+    # its call_id, even if a non-chain item (custom_tool_call, reasoning, ...)
+    # splits the two into different contiguous runs. Checking only the local
+    # run used to synthesize a duplicate "aborted" output, which strict
+    # upstreams reject with "Duplicate tool output for call_id".
+    answered_anywhere = {
+        call_id
+        for item in items
+        if isinstance(item, dict) and item.get("type") in OUTPUT_TYPES
+        for call_id in [_call_id_of(item)]
+        if call_id
+    }
+
     result: list = []
     synthesized = 0
     index = 0
@@ -228,10 +241,9 @@ def _normalize_batches(items: list, synth_missing: bool) -> tuple[list, int]:
         result.extend(calls)
         result.extend(outputs)
         if synth_missing:
-            answered = {_call_id_of(output) for output in outputs}
             for call in calls:
                 call_id = _call_id_of(call)
-                if call_id and call_id not in answered:
+                if call_id and call_id not in answered_anywhere:
                     result.append(
                         {"type": "function_call_output", "call_id": call_id, "output": "aborted"}
                     )
@@ -616,7 +628,45 @@ def selftest() -> int:
     assert items[4]["call_id"] == "call_missing" and items[4]["output"] == "aborted"
     assert "do the thing" in items[6]["content"][0]["text"], items[6]
     assert "TOKEN: ABC-123" in items[6]["content"][0]["text"], items[6]
+
+    # Regression: a custom_tool_call between a function_call and its output
+    # must not cause a synthesized duplicate.
+    split_payload = {
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {
+                "type": "function_call",
+                "call_id": "call_split",
+                "name": "exec_command",
+                "arguments": "{}",
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** End Patch\n",
+            },
+            {"type": "function_call_output", "call_id": "call_split", "output": "real output"},
+            {"type": "custom_tool_call_output", "call_id": "call_patch", "output": "patch ok"},
+            {
+                "type": "function_call",
+                "call_id": "call_really_missing",
+                "name": "read_file",
+                "arguments": "{}",
+            },
+        ]
+    }
+    split_stats = repair_payload(split_payload)
+    split_outputs = [
+        item for item in split_payload["input"] if item.get("type") == "function_call_output"
+    ]
+    split_ids = [item.get("call_id") for item in split_outputs]
+    assert split_ids.count("call_split") == 1, split_ids
+    assert split_ids.count("call_really_missing") == 1, split_ids
+    assert split_stats.synthesized_outputs == 1, split_stats
+
     print("selftest OK:", stats.summary())
+    print("selftest duplicate-guard OK:", split_stats.summary())
     return 0
 
 
