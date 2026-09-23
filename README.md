@@ -81,7 +81,7 @@ Codex 主仓库（openai/codex）：
 | `deepseek.config.psd1` | 配置：`Upstream` / `Listen` / `Role` / `Verbose` / `LogFile` |
 | `deepseek.ps1` | 便捷启动脚本，读取上面的配置，可用参数覆盖 |
 | `start-proxy.cmd` | 双击 = 前台启动代理 |
-| `restart-service.cmd` | 双击 = 停止并重新后台启动代理（改完配置或 key 后用） |
+| `restart-service.cmd` | 双击 = 停止并重新后台启动代理（改完 `deepseek.config.psd1` 后用） |
 | `install-autostart.cmd` | 双击 = 安装开机自启（当前用户 Startup 快捷方式，无需管理员） |
 | `uninstall-autostart.cmd` | 双击 = 卸载自启并停止代理进程 |
 
@@ -121,10 +121,14 @@ rollout 里，但每次发送时都会被代理修掉。
 
 双击 `uninstall-autostart.cmd` 即可卸载，并停止由本目录启动的代理进程。
 
-改完 `deepseek.config.psd1`、换了 `Upstream`，或者更新了 `DEEPSEEK_API_KEY`
-之后，双击 `restart-service.cmd` 就能让新配置生效：它会停掉正在运行的代理，
-按当前配置重新后台启动，并确认监听端口已经起来。不需要重装自启，也不需要
-重启 Codex。
+改完 `deepseek.config.psd1`（`Upstream` / `Listen` / `Role` / `LogFile`）之后，
+双击 `restart-service.cmd` 就能让新配置生效：它会停掉正在运行的代理，按当前配置
+重新后台启动，并确认监听端口已经起来，不需要重装自启。
+
+注意：`DEEPSEEK_API_KEY` 是 **Codex** 通过 `env_key` 读取、再由 Codex 放进
+Authorization 头的，代理只负责透传。所以换 key 之后要重启的是 Codex，不是这个
+代理；重启代理只对 `deepseek.config.psd1` 里的改动生效。只有将来让代理自己持有
+key（`--api-key-env` 模式）时，重启代理才会影响鉴权。
 
 ## 配置项
 
