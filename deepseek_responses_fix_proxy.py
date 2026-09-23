@@ -69,7 +69,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass, field
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 CALL_TYPES = {"function_call"}
 OUTPUT_TYPES = {"function_call_output"}
@@ -340,6 +340,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _forward(self, method: str) -> None:
         server: ProxyServer = self.server  # type: ignore[assignment]
+        self._headers_sent = False
         try:
             body = self._read_body() if method in {"POST", "PUT", "PATCH"} else b""
             body, stats = self._repair(body)
@@ -373,6 +374,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("Transfer-Encoding", "chunked")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                self._headers_sent = True
                 streamed = self._relay(response, bodyless=bodyless)
             finally:
                 connection.close()
@@ -383,42 +385,56 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 sys.stderr.write(
                     f"{method} {self.path} -> {response.status} ({streamed} bytes, {note})\n"
                 )
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The client went away (cancelled turn, closed tab, short-lived
+            # probe). This is normal and must not be logged as a proxy error.
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 - keep the proxy alive
-            self.log_error("proxy error for %s %s: %r", method, self.path, exc)
-            if not self.wfile.closed:
-                try:
-                    self.send_error(502, "proxy error", str(exc))
-                except Exception:  # noqa: BLE001
-                    pass
+            if self._headers_sent:
+                # Status/headers are already on the wire; a 502 here would be
+                # appended to the existing response and corrupt the stream.
+                if server.verbose:
+                    sys.stderr.write(
+                        f"stream aborted after headers for {method} {self.path}: {exc!r}\n"
+                    )
+            else:
+                self.log_error("proxy error for %s %s: %r", method, self.path, exc)
+                if not self.wfile.closed:
+                    try:
+                        self.send_error(502, "proxy error", str(exc))
+                    except Exception:  # noqa: BLE001
+                        pass
             self.close_connection = True
 
     def _relay(self, response: http.client.HTTPResponse, *, bodyless: bool = False) -> int:
         total = 0
         reader = getattr(response, "read1", None)
-        while True:
-            if reader is not None:
-                try:
-                    chunk = reader(65536)
-                except (NotImplementedError, ValueError):
-                    reader = None
+        try:
+            while True:
+                if reader is not None:
+                    try:
+                        chunk = reader(65536)
+                    except (NotImplementedError, ValueError):
+                        reader = None
+                        continue
+                else:
+                    chunk = response.read(65536)
+                if not chunk:
+                    break
+                if bodyless:
+                    total += len(chunk)
                     continue
-            else:
-                chunk = response.read(65536)
-            if not chunk:
-                break
-            if bodyless:
+                self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
                 total += len(chunk)
-                continue
-            self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
-            self.wfile.write(chunk)
-            self.wfile.write(b"\r\n")
-            self.wfile.flush()
-            total += len(chunk)
-        if not bodyless:
-            self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
+            if not bodyless:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client disconnected while we were streaming; nothing to repair.
+            return total
         return total
 
 

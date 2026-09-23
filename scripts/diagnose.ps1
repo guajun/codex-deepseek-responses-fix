@@ -55,7 +55,13 @@ function Test-TcpPort {
 }
 
 function Invoke-RawHttpGet {
-    param([string]$TargetHost, [int]$TargetPort, [string]$Path = '/', [int]$TimeoutMs = 4000)
+    param(
+        [string]$TargetHost,
+        [int]$TargetPort,
+        [string]$Path = '/',
+        [string]$AuthorizationHeader = '',
+        [int]$TimeoutMs = 4000
+    )
     $client = New-Object System.Net.Sockets.TcpClient
     try {
         $async = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
@@ -64,12 +70,17 @@ function Invoke-RawHttpGet {
         $stream = $client.GetStream()
         $stream.ReadTimeout = $TimeoutMs
         $stream.WriteTimeout = $TimeoutMs
-        $request = "GET $Path HTTP/1.1`r`nHost: $TargetHost`r`nConnection: close`r`n`r`n"
+        $request = "GET $Path HTTP/1.1`r`nHost: $TargetHost`r`nConnection: close`r`n"
+        if ($AuthorizationHeader) { $request += "Authorization: $AuthorizationHeader`r`n" }
+        $request += "`r`n"
         $bytes = [System.Text.Encoding]::ASCII.GetBytes($request)
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush()
         $reader = New-Object System.IO.StreamReader($stream)
-        return $reader.ReadLine()
+        $statusLine = $reader.ReadLine()
+        # Drain the rest of the response so we do not abort the proxy mid-stream.
+        while ($null -ne $reader.ReadLine()) { }
+        return $statusLine
     }
     catch {
         return $null
@@ -112,6 +123,7 @@ $wireApi = ''
 $hasToken = $false
 $envKeyName = ''
 $envKeyPresent = $false
+$credential = ''
 if (Test-Path -LiteralPath $ConfigPath) {
     $cfgText = Get-Content -LiteralPath $ConfigPath -Raw
     $blockMatch = [regex]::Match($cfgText, '(?s)\[model_providers\.deepseek\](.*?)(?=\r?\n\[|\z)')
@@ -123,6 +135,12 @@ if (Test-Path -LiteralPath $ConfigPath) {
         $envKeyName = [regex]::Match($block, '(?m)^\s*env_key\s*=\s*"([^"]+)"').Groups[1].Value
         if ($envKeyName) {
             $envKeyPresent = [bool][Environment]::GetEnvironmentVariable($envKeyName)
+        }
+        if ($hasToken) {
+            $credential = [regex]::Match($block, '(?m)^\s*experimental_bearer_token\s*=\s*"([^"]+)"').Groups[1].Value
+        }
+        elseif ($envKeyName -and $envKeyPresent) {
+            $credential = [Environment]::GetEnvironmentVariable($envKeyName)
         }
         Add-Result OK 'deepseek provider block found' "wire_api=$wireApi base_url=$baseUrl"
     }
@@ -227,9 +245,18 @@ else {
 }
 
 if ($portListening) {
-    $statusLine = Invoke-RawHttpGet -TargetHost $proxyHost -TargetPort $proxyPort -Path '/__diagnose__'
+    $authHeader = if ($credential) { "Bearer $credential" } else { '' }
+    $statusLine = Invoke-RawHttpGet -TargetHost $proxyHost -TargetPort $proxyPort -Path '/__diagnose__' -AuthorizationHeader $authHeader
     if ($statusLine) {
-        Add-Result OK 'proxy -> upstream chain responded' $statusLine 'Any HTTP status here means the proxy forwarded the request upstream.'
+        if ($credential -and $statusLine -match '\s401\s') {
+            Add-Result FAIL 'upstream rejected the configured credential' $statusLine 'The proxy and network are fine; fix experimental_bearer_token / env_key and restart Codex.'
+        }
+        elseif ($credential) {
+            Add-Result OK 'proxy -> upstream chain responded with credentials' $statusLine 'Auth accepted; the full Codex request path is ready.'
+        }
+        else {
+            Add-Result OK 'proxy -> upstream chain responded (unauthenticated probe)' $statusLine 'No credential found, so a 401 here is expected.'
+        }
     }
     else {
         Add-Result FAIL 'proxy did not answer the HTTP probe' '' 'The port is open but no HTTP response came back; check proxy.log.'
@@ -269,9 +296,21 @@ else {
 
 # --- 7. recent log status codes -------------------------------------------
 if (Test-Path -LiteralPath $logPath) {
-    $logLines = Get-Content -LiteralPath $logPath -Tail 400 -ErrorAction SilentlyContinue
+    $logLines = Get-Content -LiteralPath $logPath -Tail 500 -Encoding UTF8 -ErrorAction SilentlyContinue
     $statuses = @{}
+    $cutoff = (Get-Date).AddMinutes(-30)
     foreach ($line in $logLines) {
+        $stamp = [regex]::Match($line, '\[(\d{2}/[A-Za-z]{3}/\d{4} \d{2}:\d{2}:\d{2})\]')
+        if (-not $stamp.Success) { continue }
+        try {
+            $when = [datetime]::ParseExact(
+                $stamp.Groups[1].Value,
+                'dd/MMM/yyyy HH:mm:ss',
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+        catch { continue }
+        if ($when -lt $cutoff) { continue }
         if ($line -match '->\s+(\d{3})\s') {
             $code = $Matches[1]
             $statuses[$code] = 1 + ($statuses[$code] -as [int])
@@ -279,14 +318,14 @@ if (Test-Path -LiteralPath $logPath) {
     }
     if ($statuses.Count -gt 0) {
         $summary = ($statuses.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key) x$($_.Value)" }) -join ', '
-        Add-Result INFO 'recent proxy response codes (last 400 log lines)' $summary
+        Add-Result INFO 'proxy response codes in the last 30 minutes' $summary
         if ($usingProxy) {
             if ($statuses.ContainsKey('401')) { Add-Result WARN 'requests were rejected with 401' 'upstream says the credential is missing or invalid' 'Check experimental_bearer_token / env_key and restart Codex.' }
             if ($statuses.ContainsKey('422')) { Add-Result WARN 'requests were rejected with 422' 'upstream schema rejection' 'Check that the proxy is actually in the path and up to date.' }
         }
-        elseif ($statuses.ContainsKey('401') -or $statuses.ContainsKey('422')) {
-            Add-Result INFO 'proxy log contains historical 401/422 entries' 'proxy is not in the request path right now' 'Switch base_url to the proxy and run diagnose.cmd again if you want to use it.'
-        }
+    }
+    else {
+        Add-Result INFO 'no proxy traffic in the last 30 minutes' '' 'Codex has not sent a request through the proxy recently.'
     }
     $tail = $logLines | Select-Object -Last 6
     Add-Result INFO 'proxy.log tail' (($tail -join ' | '))
