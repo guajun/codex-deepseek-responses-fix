@@ -82,8 +82,8 @@ Codex 主仓库（openai/codex）：
 | `deepseek.ps1` | 便捷启动脚本，读取上面的配置，可用参数覆盖 |
 | `start-proxy.cmd` | 双击 = 前台启动代理 |
 | `restart-service.cmd` | 双击 = 停止并重新后台启动代理（改完 `deepseek.config.psd1` 后用） |
-| `install-autostart.cmd` | 双击 = 安装开机自启（当前用户 Startup 快捷方式，无需管理员） |
-| `uninstall-autostart.cmd` | 双击 = 卸载自启并停止代理进程 |
+| `install-autostart.cmd` | 双击 = 安装看门狗任务（登录自启 + 每 5 分钟自愈，无需管理员） |
+| `uninstall-autostart.cmd` | 双击 = 卸载看门狗任务并停止代理进程 |
 
 ## 快速开始
 
@@ -116,10 +116,16 @@ rollout 里，但每次发送时都会被代理修掉。
 
 ### 3. 开机自启
 
-双击 `install-autostart.cmd`：会在当前用户的启动文件夹里创建一个快捷方式，
-用 `pythonw.exe` 无窗口启动代理，并立即在后台启动一次。整个过程不需要管理员权限。
+双击 `install-autostart.cmd`：注册一个**当前用户级计划任务**（无需管理员），
+它在登录后 30 秒触发一次，并且每 5 分钟运行一次 `scripts\ensure-proxy.ps1`。
+这个脚本先检查监听端口，只有代理没在跑时才启动，所以这个任务同时是自启和看门狗：
+代理崩溃、被误杀，或者只是重启了 Codex 而代理没起来，最多 5 分钟内都会自动恢复。
 
-双击 `uninstall-autostart.cmd` 即可卸载，并停止由本目录启动的代理进程。
+旧版「启动文件夹快捷方式」只会在此前从未登录过的下次登录时执行一次，代理中途挂掉
+不会拉起，所以安装脚本会自动删除它，避免两个启动器抢同一个端口。
+
+启动/失败事件记录在 `watchdog.log`，请求流量记录在 `proxy.log`。
+双击 `uninstall-autostart.cmd` 即可注销任务并停止由本目录启动的代理进程。
 
 改完 `deepseek.config.psd1`（`Upstream` / `Listen` / `Role` / `LogFile`）之后，
 双击 `restart-service.cmd` 就能让新配置生效：它会停掉正在运行的代理，按当前配置

@@ -1,14 +1,22 @@
 <#
 .SYNOPSIS
-    Install a per-user auto-start entry for the DeepSeek fix proxy.
+    Install a self-healing auto-start task for the DeepSeek fix proxy.
 
 .DESCRIPTION
-    Creates a shortcut in the current user's Startup folder that launches the
-    proxy with pythonw.exe (no console window) at logon. No administrator
-    rights are required. The shortcut is rebuilt from deepseek.config.psd1.
+    Registers a per-user scheduled task that runs scripts\ensure-proxy.ps1:
+
+      * at logon (with a 30 second delay), and
+      * every 5 minutes, indefinitely.
+
+    ensure-proxy.ps1 only starts the proxy when the listen port is down, so the
+    task doubles as a watchdog: if the proxy crashes or is killed, it comes back
+    within five minutes.
+
+    The legacy per-user Startup-folder shortcut is removed automatically to
+    avoid two competing launchers. No administrator rights are required.
 
 .PARAMETER NoStart
-    Only create the shortcut; do not start the proxy immediately.
+    Only register the task; do not start the proxy immediately.
 #>
 [CmdletBinding()]
 param(
@@ -17,54 +25,64 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+$taskName = 'Codex DeepSeek Fix Proxy'
+$ensure = Join-Path $PSScriptRoot 'ensure-proxy.ps1'
 $configPath = Join-Path $root 'deepseek.config.psd1'
+
+if (-not (Test-Path -LiteralPath $ensure)) { throw "Missing helper: $ensure" }
+
 $cfg = @{}
 if (Test-Path -LiteralPath $configPath) {
-    $cfg = Import-PowerShellDataFile -LiteralPath $configPath
+    if (Get-Command Import-PowerShellDataFile -ErrorAction SilentlyContinue) {
+        $cfg = Import-PowerShellDataFile -LiteralPath $configPath
+    }
+    else {
+        $cfg = . $configPath
+    }
 }
-
 $upstream = if ($cfg.Upstream) { $cfg.Upstream } else { 'https://api.deepseek.com' }
 $listen = if ($cfg.Listen) { $cfg.Listen } else { '127.0.0.1:18787' }
 $role = if ($cfg.Role) { $cfg.Role } else { 'user' }
-$verbose = if ($null -ne $cfg.Verbose) { [bool]$cfg.Verbose } else { $true }
-$logFile = if ($cfg.LogFile) { $cfg.LogFile } else { Join-Path $root 'proxy.log' }
-$proxy = Join-Path $root 'deepseek_responses_fix_proxy.py'
-if (-not (Test-Path -LiteralPath $proxy)) { throw "Proxy script not found: $proxy" }
 
-$python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $python) { throw 'python was not found on PATH. Install Python 3.11+ first.' }
-$pythonw = Join-Path (Split-Path -Parent $python) 'pythonw.exe'
-if (-not (Test-Path -LiteralPath $pythonw)) { $pythonw = $python }
+# Remove the legacy Startup-folder shortcut: it only ran at logon and never
+# recovered a crashed proxy.
+$legacyShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'DeepSeek Responses Fix Proxy.lnk'
+if (Test-Path -LiteralPath $legacyShortcut) {
+    Remove-Item -LiteralPath $legacyShortcut -Force
+    Write-Host "Removed legacy Startup shortcut: $legacyShortcut"
+}
 
-$arguments = @($proxy, '--listen', $listen, '--upstream', $upstream, '--role', $role, '--log-file', $logFile)
-if ($verbose) { $arguments += '--verbose' }
-$argumentLine = ($arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $ensure)
 
-$startupFolder = [Environment]::GetFolderPath('Startup')
-$shortcutPath = Join-Path $startupFolder 'DeepSeek Responses Fix Proxy.lnk'
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+try { $logonTrigger.Delay = 'PT30S' } catch { }
 
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $pythonw
-$shortcut.Arguments = $argumentLine
-$shortcut.WorkingDirectory = $root
-$shortcut.WindowStyle = 7
-$shortcut.Description = 'DeepSeek Responses fix proxy for Codex (missing call_id workaround)'
-$shortcut.Save()
+$repeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 
-Write-Host 'Auto-start installed.' -ForegroundColor Green
-Write-Host "  shortcut : $shortcutPath"
-Write-Host "  pythonw  : $pythonw"
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType Interactive -RunLevel Limited
+
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger, $repeatTrigger) `
+    -Settings $settings -Principal $principal -Force `
+    -Description 'Watchdog for the DeepSeek Responses fix proxy (Codex missing call_id workaround).' | Out-Null
+
+Write-Host 'Auto-start watchdog installed.' -ForegroundColor Green
+Write-Host "  task     : $taskName"
+Write-Host '  runs     : at logon (+30s) and every 5 minutes, self-healing'
+Write-Host "  action   : $ensure"
 Write-Host "  upstream : $upstream"
 Write-Host "  listen   : $listen"
 Write-Host "  role     : $role"
-Write-Host "  log      : $logFile"
 
 if (-not $NoStart) {
-    Start-Process -FilePath $pythonw -ArgumentList $argumentLine -WorkingDirectory $root -WindowStyle Hidden
-    Write-Host 'Proxy started in the background now.' -ForegroundColor Green
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ensure
+    Write-Host 'Proxy ensured: it was started if the port was down.' -ForegroundColor Green
 }
 
 Write-Host ''
-Write-Host 'Codex config.toml should contain:'
-Write-Host "  base_url = `"http://$listen/`""
+Write-Host 'Check watchdog.log for start/failure events, proxy.log for request traffic.'

@@ -1,5 +1,7 @@
 proxy.log
 proxy.log.*
+watchdog.log
+watchdog.log.*
 *.log
 __pycache__/
 *.py[cod]
