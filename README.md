@@ -27,6 +27,41 @@ Codex 自己的协议允许 `call_id` 为空（序列化时直接省略这个键
 `function_call_output.call_id` 必填，于是整包请求被拒。坏条目还会写进 rollout，
 之后每一轮都会重放，线程看起来就「永久卡死」，只能 fork。
 
+这是 Codex 与严格 Responses 上游之间的已知不兼容，不是配置写错了。DeepSeek 的
+Rust 服务端在反序列化阶段直接拒包，所以报的是 `422 Unprocessable Entity`；Azure、
+Kimi 等其它严格上游对同一类坏条目通常报 `400` 或 `tool_call_id is not found`。
+上游 issue 见下一节。
+
+## 相关已知 issue
+
+以下 issue 截至 **2026-09-23** 全部仍为 open，没有进入任何 Codex release。
+本仓库是客户端侧的 workaround；等上游修好后把 `base_url` 改回直连即可。
+
+Codex 主仓库（openai/codex）：
+
+| Issue | 状态 | 说明 |
+| --- | --- | --- |
+| [#42088](https://github.com/openai/codex/issues/42088) | open | 总根因：`function_call_output` 可以不带 `call_id`，严格上游直接拒包 |
+| [#46193](https://github.com/openai/codex/issues/46193) | open | 配对校验只在重建历史时做，发送边界没有守卫；孤立输出是设计产物 |
+| [#45450](https://github.com/openai/codex/issues/45450) | open | 只补 `call_id` 不够：没有配套 `function_call` 仍会被拒 |
+| [#45227](https://github.com/openai/codex/issues/45227) | open | Windows + DeepSeek：坏条目写进 rollout 后整个线程永久失败 |
+| [#45914](https://github.com/openai/codex/issues/45914) | open | `send_message_to_thread` 的 `function_call_output` 落盘时没有 `call_id` |
+| [#45318](https://github.com/openai/codex/issues/45318) | open | 跨任务消息被记成无 `call_id` 的 `function_call_output`，整轮请求被拒 |
+| [#42067](https://github.com/openai/codex/issues/42067) | open | 普通 resume / 跨线程发送同样会踩到缺 `call_id` 的注入条目 |
+| [#41690](https://github.com/openai/codex/issues/41690) | open | Desktop 自动化 + DeepSeek Responses：`automation_update` 输出缺 `call_id` |
+| [#44723](https://github.com/openai/codex/issues/44723) | open | heartbeat / cron 自动化注入无 `call_id` 条目，卡死目标会话 |
+| [#44519](https://github.com/openai/codex/issues/44519) | open | Windows：线程心跳自动化同样触发该问题 |
+| [#44779](https://github.com/openai/codex/issues/44779) | open | `tool_search` 也有同类 `call_id` 严格校验问题（本代理暂不处理） |
+
+第三方网关 cc-switch（同类现象的复现与修复讨论）：
+
+| Issue | 状态 | 说明 |
+| --- | --- | --- |
+| [cc-switch#6995](https://github.com/farion1231/cc-switch/issues/6995) | open | 心跳自动化注入的孤立输出导致 DeepSeek 400、会话永久卡死 |
+| [cc-switch#7074](https://github.com/farion1231/cc-switch/issues/7074) | open | cron 自动化 `automation_update` 的同一问题 |
+| [cc-switch#7551](https://github.com/farion1231/cc-switch/issues/7551) | open | `create_thread` 委派注入缺 `call_id`，DeepSeek 422，新任务首轮即失败 |
+| [cc-switch#7127](https://github.com/farion1231/cc-switch/issues/7127) | open | 自动化经 cc-switch 转发给 DeepSeek 的同类问题 |
+
 ## 代理怎么修
 
 请求经过代理时做三件事，其余内容（Header、Authorization、query、SSE 流）原样透传：
@@ -124,7 +159,13 @@ rollout 里，但每次发送时都会被代理修掉。
 ## 限制与注意
 
 - 代理只修 `function_call` / `function_call_output` 这一类 schema 问题，
-  不处理 `tool_search_call`、thinking 模式的 reasoning 格式等其它严格校验。
+  不处理 `tool_search_call`（见
+  [#44779](https://github.com/openai/codex/issues/44779)）、thinking 模式的
+  reasoning 格式等其它严格校验。
+- 不要只给孤立输出补一个假 `call_id`：上游会改报
+  `No tool call found for tool output with call_id ...`（见
+  [#45450](https://github.com/openai/codex/issues/45450)）。必须补配套的
+  `function_call`，或者降级成普通 message —— 本代理选后者。
 - 必须保持代理先于 Codex 运行；代理挂了 Codex 会连接失败。
 - 只监听 `127.0.0.1`，不要改成 `0.0.0.0`：它会透传 Authorization，
   暴露到局域网等于开放中转。
