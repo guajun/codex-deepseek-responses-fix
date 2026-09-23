@@ -64,6 +64,36 @@ Codex 主仓库（openai/codex）：
 | [cc-switch#7551](https://github.com/farion1231/cc-switch/issues/7551) | open | `create_thread` 委派注入缺 `call_id`，DeepSeek 422，新任务首轮即失败 |
 | [cc-switch#7127](https://github.com/farion1231/cc-switch/issues/7127) | open | 自动化经 cc-switch 转发给 DeepSeek 的同类问题 |
 
+## 子智能体 payload：V1/V2 投递模式
+
+原生子智能体（`spawn_agent` / `followup_task`）的任务正文在 Multi-Agent V2 下不会直接写在
+`input_text` 里，而是放进 `agent_message` 的 `encrypted_content` part；OpenAI 上游能解，
+自定义 provider（DeepSeek）不认识这个字段，于是子智能体只看到 `Payload:` 后面空白，回复
+「没有任务」。
+
+Codex 的版本解析优先级（源码 `core/src/config/mod.rs`）：
+
+```text
+features.multi_agent_v2 显式开启  >  model catalog 的 multi_agent_version  >  Collab 回退（V1）
+```
+
+注意：如果 `model_catalog_json` 指向的 catalog 给模型写了
+`"multi_agent_version": "v2"`，那么 `--disable multi_agent_v2` /
+`[features] multi_agent_v2 = false` 都不会生效——feature 关闭后返回 `None`，由 catalog
+的 `v2` 接管。V2 自身没有明文/加密投递的配置项（上游请求见
+[#46939](https://github.com/openai/codex/issues/46939)）。
+
+因此有两条路：
+
+| 路线 | 做法 | 结果 | 代价 |
+| --- | --- | --- | --- |
+| A：V1 明文投递 | 把 `model_catalog_json` 指向的 catalog 里对应模型的 `multi_agent_version` 改成 `"v1"`，保持 `features.multi_agent_v2` 关闭，重启 Codex | 子智能体收到普通 user message，payload 明文可见 | 退回 V1 工具面：`send_input` / `wait_agent` / `resume_agent` / `close_agent`，`spawn_agent` 没有 `task_name`，也没有 `send_message` / `followup_task` / `list_agents` / `interrupt_agent` |
+| B：V2 + 代理改写（本仓库默认） | 保持 catalog 的 `"v2"`，让请求走本代理（v1.0.2 起） | 保留 V2 全部工具面，代理把信封 + `encrypted_content` 正文合并成标准 user message | 需要代理常驻在请求链路里 |
+
+两条路都实测过：路线 A 用 `-c model_catalog_json=<把 DeepSeek 改成 v1 的副本>` 跑探针，
+子线程 rollout 里是 `payload=message role=user`、`input_text` 直接是任务正文；路线 B 保持
+catalog v2，探针完整收到 payload，代理日志对应 `rewrote 1 agent message(s)`。
+
 ## 代理怎么修
 
 请求经过代理时做四件事，其余内容（Header、Authorization、query、SSE 流）原样透传：
@@ -198,6 +228,11 @@ key（`--api-key-env` 模式）时，重启代理才会影响鉴权。
   普通 JSON 接口不受影响。
 - DeepSeek 实弹对照：同一个畸形 payload 直连返回 `422 missing field call_id`，
   经代理返回 `200`。
+- 子智能体 payload（路线 B，当前默认）：catalog 保持 `v2`，代理 v1.0.2 改写
+  `agent_message` 后，子智能体完整收到 payload（`TOKEN: ROUTEB-5K9`），代理日志
+  `rewrote 1 agent message(s)`。
+- 子智能体 payload（路线 A 对照）：catalog 改成 `v1` 时，子线程收到的是普通
+  `message role=user`、正文明文，子智能体回复 `PLAIN-4T7`。
 
 ## 限制与注意
 
